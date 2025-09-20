@@ -8,25 +8,21 @@ pd.set_option("display.max_columns", None)
 DATA_DIR = Path("data_historic")
 DATA_DIR.mkdir(exist_ok=True)
 
-SEASONS = list(range(2000, 2025))  # 2000 through 2024
+SEASONS = list(range(2000, 2025))  
 
-# ---------- Schedules ----------
 print("Loading schedules...")
 schedules = nfl.import_schedules(SEASONS)
 print("schedules shape:", schedules.shape)
 schedules.to_parquet(DATA_DIR / "schedules_2000_2024.parquet", index=False)
 print("Schedules saved.\n")
 
-# ---------- Weekly player stats ----------
 print("Loading weekly player stats...")
 weekly = nfl.import_weekly_data(SEASONS)
 print("weekly shape:", weekly.shape)
 weekly.to_parquet(DATA_DIR / "weekly_2000_2024.parquet", index=False)
 print("Weekly player stats saved.\n")
 
-# ---------- Play-by-play ----------
 print("Loading play-by-play (this will take the longest)...")
-# Safer to loop season by season and save individually
 for season in SEASONS:
     print(f"  -> {season}")
     pbp = nfl.import_pbp_data([season])
