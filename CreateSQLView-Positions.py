@@ -1,13 +1,9 @@
-# CreateSQLView-Positions.py  — dynamic base view + position marts (RB/WR/TE/QB)
 from sqlalchemy import create_engine, text
 import pandas as pd
 
-# --- DB CONFIG (edit if needed) ---
 USER="SeanZahller"; PASS="YvMiTe9!2"; HOST="localhost"; PORT=5432; DB="nfl_warehouse"
 engine = create_engine(f"postgresql+psycopg2://{USER}:{PASS}@{HOST}:{PORT}/{DB}", pool_pre_ping=True)
 
-
-# ---------- helpers to detect your hist_weekly column names ----------
 def cols_present():
     with engine.connect() as con:
         df = pd.read_sql(
@@ -34,38 +30,30 @@ def pick(C, options, cast=None, default="0"):
     return f"COALESCE({expr}, {default})" if expr.startswith("hw.") else default
 
 
-# ---------- build SQL for mart.v_player_games (no direct hw.* in marts) ----------
 def build_v_player_games_sql():
     C = cols_present()
-
-    # Passing
     completions     = pick(C, ["completions","cmp"],                    "int")
     attempts_pass   = pick(C, ["attempts","pass_attempts","att"],       "int")
     passing_yards   = pick(C, ["passing_yards","pass_yards"],           "numeric")
     passing_tds     = pick(C, ["passing_tds","pass_tds"],               "int")
     interceptions   = pick(C, ["interceptions","interceptions_thrown","ints"], "int")
 
-    # Rushing  (your table has "carries")
     rushing_att     = pick(C, ["rushing_attempts","rushing_att","rush_attempts","carries"], "int")
     rushing_yards   = pick(C, ["rushing_yards","rush_yards"],           "numeric")
     rushing_tds     = pick(C, ["rushing_tds","rush_tds"],               "int")
 
-    # Receiving
     targets         = pick(C, ["targets"],                               "int")
     receptions      = pick(C, ["receptions","rec"],                      "int")
     receiving_yards = pick(C, ["receiving_yards","rec_yards"],           "numeric")
     receiving_tds   = pick(C, ["receiving_tds","rec_tds"],               "int")
 
-    # Positions
     position        = pick(C, ["position"],                              None, "NULL")
     position_group  = pick(C, ["position_group"],                        None, position)  # fallback to position
 
-    # Derived
     scrimmage_yards = f"(({rushing_yards}) + ({receiving_yards}))::numeric"
     skill_tds       = f"(({rushing_tds}) + ({receiving_tds}))::int"
     qb_total_yards  = f"(({passing_yards}) + ({rushing_yards}))::numeric"
 
-    # Keep v_player_games minimal (only fields needed by marts) to avoid schema drift
     return f"""
     CREATE SCHEMA IF NOT EXISTS mart;
 
@@ -115,8 +103,6 @@ def build_v_player_games_sql():
      AND g.team   = hw.recent_team;
     """
 
-
-# ---------- static marts (reference ONLY mart.v_player_games) ----------
 MARTS_SQL = r"""
 -- RB all-time/season/last/rolling
 CREATE OR REPLACE VIEW mart.v_rb_alltime_stats AS
@@ -337,7 +323,6 @@ def main():
         con.execute(text(MARTS_SQL))
     print("✅ Created/updated: mart.v_player_games and all position marts (RB/WR/TE/QB).")
 
-    # quick smoke peek
     with engine.connect() as con:
         count = con.execute(text("SELECT COUNT(*) FROM mart.v_player_games")).scalar()
         print(f"v_player_games rows: {count:,}")

@@ -3,13 +3,9 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 import nfl_data_py as nfl
 
-# --- DB CONFIG (edit if needed) ---
 USER="SeanZahller"; PASS="YvMiTe9!2"; HOST="localhost"; PORT=5432; DB="nfl_warehouse"
 engine = create_engine(f"postgresql+psycopg2://{USER}:{PASS}@{HOST}:{PORT}/{DB}", pool_pre_ping=True)
 
-# ============================
-# QB VIEWS
-# ============================
 SQL_QB = r"""
 CREATE SCHEMA IF NOT EXISTS mart;
 
@@ -114,9 +110,7 @@ FROM mart.v_qb_season_splits s
 WHERE s.season = (SELECT MAX(season) FROM hist_schedules);
 """
 
-# ============================
-# COACH MAPPING + VIEWS
-# ============================
+
 DDL_COACH_DIM = r"""
 CREATE TABLE IF NOT EXISTS dim_team_head_coach(
   season int NOT NULL,
@@ -192,14 +186,12 @@ def refresh_coach_mapping_from_schedules():
     Build (season, week, team, head_coach) by merging nfl_data_py schedules to our DB on game_id,
     then use *DB team codes* to avoid any abbreviation mismatches (e.g., LAR/LA, JAC/JAX).
     """
-    # Seasons we have in DB
     with engine.connect() as con:
         min_season, max_season = con.execute(text("SELECT MIN(season), MAX(season) FROM hist_schedules")).one()
     min_season, max_season = int(min_season), int(max_season)
     seasons = list(range(min_season, max_season + 1))
     print(f"Building coach map for seasons {min_season}-{max_season}...")
 
-    # Pull schedules (need game_id + coaches)
     sched = nfl.import_schedules(seasons)
     needed = {"game_id","season","week","game_type","home_coach","away_coach"}
     missing = needed - set(sched.columns)
@@ -208,7 +200,6 @@ def refresh_coach_mapping_from_schedules():
 
     sched = sched[list(needed)].copy()
 
-    # Get our DB's game_id + team codes (truth for team abbreviations)
     with engine.connect() as con:
         db_sched = pd.read_sql(
             text("""
@@ -219,7 +210,7 @@ def refresh_coach_mapping_from_schedules():
             """), con
         )
 
-    # Merge on game_id to align precisely
+
     m = db_sched.merge(
         sched,
         on=["game_id","season","week","game_type"],
@@ -228,7 +219,6 @@ def refresh_coach_mapping_from_schedules():
         suffixes=("_db","_src")
     )
 
-    # Build mapping rows (use DB team codes with coach names from schedules)
     home_rows = m[["season","week","game_type","home_team","home_coach"]].rename(
         columns={"home_team":"team","home_coach":"head_coach"}
     )
@@ -237,18 +227,15 @@ def refresh_coach_mapping_from_schedules():
     )
     coach_map = pd.concat([home_rows, away_rows], ignore_index=True)
 
-    # Keep regular + postseason, valid coach names only
     coach_map = coach_map[coach_map["game_type"].isin(["REG","WC","DIV","CON","SB"])]
     coach_map = coach_map.dropna(subset=["head_coach"]).copy()
     coach_map["head_coach"] = coach_map["head_coach"].astype(str).str.strip()
 
-    # Final shape & types
     coach_map = coach_map.drop_duplicates(subset=["season","week","team"])
     coach_map = coach_map.astype({"season":int,"week":int,"team":"string","head_coach":"string"})
 
     print(f"Prepared {len(coach_map):,} coach rows to upsert.")
 
-    # Ensure dim table exists and UPSERT
     with engine.begin() as con:
         con.execute(text(DDL_COACH_DIM))
         tmp = "dim_team_head_coach_tmp"
@@ -295,12 +282,7 @@ def sanity_peek():
             print("Coach views not available yet (did coach mapping fail?).", e)
 
 if __name__ == "__main__":
-    # QB views depend on your existing team-game mart views (built earlier).
     build_qb_views()
-
-    # Build/refresh coach mapping from schedules, then create coach views.
     refresh_coach_mapping_from_schedules()
     build_coach_views()
-
-    # Quick read-only check
     sanity_peek()

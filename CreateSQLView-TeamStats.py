@@ -2,11 +2,10 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 import pandas as pd
 
-# ---- DB SETTINGS (edit if needed) ----
 USER = "SeanZahller"
 PASS = "YvMiTe9!2"
 HOST = "localhost"
-PORT = 5432          # use the host port from Docker Desktop
+PORT = 5432          
 DB   = "nfl_warehouse"
 
 engine = create_engine(f"postgresql+psycopg2://{USER}:{PASS}@{HOST}:{PORT}/{DB}", pool_pre_ping=True)
@@ -153,7 +152,6 @@ def run_build():
         con.execute(text(SQL_BUILD))
     print("✅ Feature mart views created/updated.")
 
-# Optional: load division mapping CSV if you have one (team+season → division)
 def load_division_mapping(csv_path: Path):
     """
     CSV columns expected: season,team,conference,division
@@ -176,7 +174,6 @@ def load_division_mapping(csv_path: Path):
               PRIMARY KEY (season, team)
             );
         """))
-        # upsert
         tmp_table = "dim_team_division_tmp"
         df.to_sql(tmp_table, engine, if_exists="replace", index=False)
         con.execute(text(f"""
@@ -209,6 +206,4 @@ def sanity_peek():
 
 if __name__ == "__main__":
     run_build()
-    # OPTIONAL: load division CSV when you have it:
-    # load_division_mapping(Path("ref/dim_team_division.csv"))
     sanity_peek()

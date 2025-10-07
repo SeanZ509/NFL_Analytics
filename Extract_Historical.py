@@ -30,4 +30,3 @@ for season in SEASONS:
     pbp.to_parquet(DATA_DIR / f"pbp_{season}.parquet", index=False)
 
 print("\nAll data saved to:", DATA_DIR.resolve())
-print("Done ✅")
