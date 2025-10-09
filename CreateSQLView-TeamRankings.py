@@ -6,99 +6,113 @@ PG_HOST = "localhost"
 PG_PORT = 5432
 PG_DB   = "nfl_warehouse"
 
-engine = create_engine(f"postgresql+psycopg2://{PG_USER}:{PG_PASS}@{PG_HOST}:{PG_PORT}/{PG_DB}", pool_pre_ping=True)
+engine = create_engine(
+    f"postgresql+psycopg2://{PG_USER}:{PG_PASS}@{PG_HOST}:{PG_PORT}/{PG_DB}",
+    pool_pre_ping=True
+)
 
-SQL = """
+sql = """
+BEGIN;
+
 CREATE SCHEMA IF NOT EXISTS mart;
 
--- 1) Team weekly stats (REG season by default)
-CREATE OR REPLACE VIEW mart.v_team_weekly_stats AS
-WITH scored_games AS (
-  SELECT season, week, game_type, gameday, home_team, away_team, home_score, away_score
+-- Drop in dependency order so we can change columns safely
+DROP VIEW IF EXISTS mart.v_team_weekly_ranks;
+DROP VIEW IF EXISTS mart.v_team_weekly_base;
+
+-- 1) Base weekly team totals (offense yards from player stats, points from schedules)
+CREATE VIEW mart.v_team_weekly_base AS
+WITH
+off_yards AS (
+  SELECT
+    season::int,
+    week::int,
+    recent_team::text AS team,
+    SUM(COALESCE(passing_yards,0))::numeric  AS off_pass_yards,
+    SUM(COALESCE(rushing_yards,0))::numeric  AS off_rush_yards
+  FROM hist_weekly
+  WHERE season_type = 'REG'
+  GROUP BY season, week, recent_team
+),
+def_yards_allowed AS (
+  -- yards *allowed* by team T == sum of opponent's offensive yards when opponent_team = T
+  SELECT
+    season::int,
+    week::int,
+    opponent_team::text AS team,                      
+    SUM(COALESCE(passing_yards,0))::numeric AS def_pass_yards_allowed,
+    SUM(COALESCE(rushing_yards,0))::numeric AS def_rush_yards_allowed
+  FROM hist_weekly
+  WHERE season_type = 'REG'
+  GROUP BY season, week, opponent_team
+),
+points AS (
+  SELECT
+    season::int,
+    week::int,
+    home_team::text AS team,
+    home_score::numeric AS points_for,
+    away_score::numeric AS points_allowed
   FROM hist_schedules
-  WHERE home_score IS NOT NULL AND away_score IS NOT NULL
-    AND game_type = 'REG'             -- <-- change/remove if you want playoffs too
-),
-team_points AS (
-  SELECT season, week, gameday,
-         home_team AS team,
-         home_score::int AS points_for,
-         away_score::int AS points_against
-  FROM scored_games
+  WHERE game_type = 'REG'
   UNION ALL
-  SELECT season, week, gameday,
-         away_team AS team,
-         away_score::int AS points_for,
-         home_score::int AS points_against
-  FROM scored_games
-),
-offense AS (
-  -- Offensive yards produced by this team in that week
-  SELECT season, week, team,
-         SUM(passing_yards)::numeric AS pass_yards_for,
-         SUM(rushing_yards)::numeric AS rush_yards_for
-  FROM mart.v_player_games
+  SELECT
+    season::int,
+    week::int,
+    away_team::text AS team,
+    away_score::numeric AS points_for,
+    home_score::numeric AS points_allowed
+  FROM hist_schedules
   WHERE game_type = 'REG'
-  GROUP BY season, week, team
-),
-defense AS (
-  -- Yards allowed by this team in that week (opponent’s yards vs them)
-  SELECT season, week, opp_team AS team,
-         SUM(passing_yards)::numeric AS pass_yards_allowed,
-         SUM(rushing_yards)::numeric AS rush_yards_allowed
-  FROM mart.v_player_games
-  WHERE game_type = 'REG'
-  GROUP BY season, week, opp_team
 )
 SELECT
-  tp.season, tp.week, tp.team, tp.gameday,
-  tp.points_for,
-  tp.points_against,
-  COALESCE(o.pass_yards_for,0)      AS pass_yards_for,
-  COALESCE(o.rush_yards_for,0)      AS rush_yards_for,
-  COALESCE(d.pass_yards_allowed,0)  AS pass_yards_allowed,
-  COALESCE(d.rush_yards_allowed,0)  AS rush_yards_allowed
-FROM team_points tp
-LEFT JOIN offense o
-  ON o.season = tp.season AND o.week = tp.week AND o.team = tp.team
-LEFT JOIN defense d
-  ON d.season = tp.season AND d.week = tp.week AND d.team = tp.team
+  p.season,
+  p.week,
+  p.team,
+
+  -- Offense totals
+  COALESCE(o.off_pass_yards,0)           AS off_pass_yards,
+  COALESCE(o.off_rush_yards,0)           AS off_rush_yards,
+  COALESCE(p.points_for,0)               AS off_points,
+
+  -- Defense allowed totals
+  COALESCE(d.def_pass_yards_allowed,0)   AS def_pass_yards_allowed,
+  COALESCE(d.def_rush_yards_allowed,0)   AS def_rush_yards_allowed,
+  COALESCE(p.points_allowed,0)           AS def_points_allowed
+FROM points p
+LEFT JOIN off_yards o
+  ON o.season = p.season AND o.week = p.week AND o.team = p.team
+LEFT JOIN def_yards_allowed d
+  ON d.season = p.season AND d.week  = p.week  AND d.team = p.team
 ;
 
--- 2) Weekly ranks (higher offense = better rank; lower allowed = better rank)
-CREATE OR REPLACE VIEW mart.v_team_weekly_ranks AS
+-- 2) Weekly ranks 1..32 (ties share rank, no gaps)
+CREATE VIEW mart.v_team_weekly_ranks AS
 SELECT
-  season, week, team, gameday,
-  points_for,
-  points_against,
-  pass_yards_for,
-  rush_yards_for,
-  pass_yards_allowed,
-  rush_yards_allowed,
+  season,
+  week,
+  team,
 
-  RANK() OVER (PARTITION BY season, week ORDER BY pass_yards_for     DESC NULLS LAST) AS off_pass_rank,
-  RANK() OVER (PARTITION BY season, week ORDER BY rush_yards_for     DESC NULLS LAST) AS off_rush_rank,
-  RANK() OVER (PARTITION BY season, week ORDER BY points_for         DESC NULLS LAST) AS off_scoring_rank,
+  off_pass_yards,
+  off_rush_yards,
+  off_points,
+  def_pass_yards_allowed,
+  def_rush_yards_allowed,
+  def_points_allowed,
 
-  RANK() OVER (PARTITION BY season, week ORDER BY pass_yards_allowed ASC  NULLS LAST) AS def_pass_rank,
-  RANK() OVER (PARTITION BY season, week ORDER BY rush_yards_allowed ASC  NULLS LAST) AS def_rush_rank,
-  RANK() OVER (PARTITION BY season, week ORDER BY points_against     ASC  NULLS LAST) AS def_scoring_rank
-FROM mart.v_team_weekly_stats;
+  DENSE_RANK() OVER (PARTITION BY season, week ORDER BY off_pass_yards        DESC) AS off_pass_rank,
+  DENSE_RANK() OVER (PARTITION BY season, week ORDER BY off_rush_yards        DESC) AS off_rush_rank,
+  DENSE_RANK() OVER (PARTITION BY season, week ORDER BY off_points             DESC) AS off_points_rank,
+
+  DENSE_RANK() OVER (PARTITION BY season, week ORDER BY def_pass_yards_allowed ASC) AS def_pass_rank,   -- fewer allowed is better
+  DENSE_RANK() OVER (PARTITION BY season, week ORDER BY def_rush_yards_allowed ASC) AS def_rush_rank,
+  DENSE_RANK() OVER (PARTITION BY season, week ORDER BY def_points_allowed     ASC) AS def_points_rank
+FROM mart.v_team_weekly_base;
+
+COMMIT;
 """
 
 with engine.begin() as con:
-    con.execute(text(SQL))
+    con.execute(text(sql))
 
-peek_sql = """
-SELECT season, week, team,
-       off_pass_rank, off_rush_rank, off_scoring_rank,
-       def_pass_rank, def_rush_rank, def_scoring_rank
-FROM mart.v_team_weekly_ranks
-WHERE season = 2025 AND week IN (1,2,3,4)
-ORDER BY week, off_pass_rank
-LIMIT 50;
-"""
-with engine.begin() as con:
-    rows = con.execute(text(peek_sql)).fetchmany(20)
-for r in rows:
-    print(r)
+print("✅ Recreated: mart.v_team_weekly_base and mart.v_team_weekly_ranks")
